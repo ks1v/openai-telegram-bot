@@ -3,7 +3,7 @@ import mysql.connector
 import json
 import datetime
 import openai
-from telegram.ext import Updater, MessageHandler, Filters
+from telegram.ext import Updater, MessageHandler, filters
 
 # Load the API secrets from a JSON file
 with open('keys.json') as f:
@@ -61,7 +61,7 @@ def save_message(chat_id, text, is_bot):
     cnx.commit()
 
 # Create a message handler that responds to all text messages
-message_handler = MessageHandler(Filters.text, handle_message)
+message_handler = MessageHandler(filters.text, handle_message)
 
 # Add the message handler to the dispatcher
 dispatcher.add_handler(message_handler)

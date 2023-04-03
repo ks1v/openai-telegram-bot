@@ -14,7 +14,7 @@ cnx = mysql.connector.connect(
     user=secrets['mariadb']['user'],
     password=secrets['mariadb']['password'],
     host='127.0.0.1',
-    database=['mariadb']['database']
+    database=secrets['mariadb']['database']
 )
 cursor = cnx.cursor()
 

@@ -1,12 +1,17 @@
 import openai
 import telegram
 import pymongo
+import json
+
+# Read API secrets from secrets.json file
+with open('keys.json', 'r') as f:
+    secrets = json.load(f)
 
 # Set up OpenAI API credentials
-openai.api_key = "your_api_key_here"
+openai.api_key = secrets['openai']['api_key']
 
 # Set up Telegram bot token
-bot_token = "your_bot_token_here"
+bot_token = secrets['telegram']['token']
 
 # Set up MongoDB database
 mongo_client = pymongo.MongoClient("mongodb://localhost:27017/")

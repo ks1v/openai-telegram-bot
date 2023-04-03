@@ -1,89 +1,79 @@
-import openai
+import telegram
 import mysql.connector
 import json
-import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+import datetime
+import openai
+from telegram.ext import Updater, MessageHandler, Filters
 
-# Load API keys from secrets.json
-with open('secrets.json') as f:
+# Load the API secrets from a JSON file
+with open('keys.json') as f:
     secrets = json.load(f)
-    openai.api_key = secrets['openai']['api_key']
-    db_password = secrets['mariadb']['password']
-    bot_token = secrets['telegram']['token']
 
-
-# Set up MySQL connection
-cnx = mysql.connector.connect(user='ks1v', 
-                              password=db_password,
-                              host='127.0.0.1',
-                              database='openai_tg_bot')
+# Set up the MariaDB connection
+cnx = mysql.connector.connect(
+    user=secrets['mariadb']['user'],
+    password=secrets['mariadb']['password'],
+    host=secrets['127.0.0.1'],
+    database=['mariadb']['database']
+)
 cursor = cnx.cursor()
 
-# Set up Telegram bot
-bot = telebot.TeleBot(bot_token)
+# Set up the OpenAI API
+openai.api_key = secrets['openai']['api_key']
 
-# Set up keyboard for storing/retrieving chats
-chat_buttons = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-store_chat_button = KeyboardButton(text='Store Chat')
-retrieve_chat_button = KeyboardButton(text='Retrieve Chat')
-chat_buttons.row(store_chat_button, retrieve_chat_button)
+# Set up the Telegram bot updater and dispatcher
+updater = Updater(token=secrets['telegram']['token'], use_context=True)
+dispatcher = updater.dispatcher
 
-# Define function to retrieve chat history
-def retrieve_chat_history(chat_id):
-    cursor.execute('SELECT * FROM chats WHERE chat_id=%s ORDER BY timestamp ASC', (chat_id,))
-    return cursor.fetchall()
+# Define a function to handle incoming messages
+def handle_message(update, context):
+    # Get the incoming message and chat ID
+    message = update.message.text
+    chat_id = update.message.chat_id
 
-# Define function to store chat history
-def store_chat_history(chat_id, messages):
-    for message in messages:
-        cursor.execute('INSERT INTO chats (chat_id, text, is_bot, timestamp) VALUES (%s, %s, %s, %s)',
-                       (chat_id, message.text, int(message.from_bot), message.date.timestamp()))
+    # Save the incoming message to the database
+    save_message(chat_id, message, False)
+
+    # Pass the message to the GPT-3.5 model
+    response = openai.Completion.create(
+        engine="davinci-2",
+        prompt=message,
+        temperature=0.7,
+        max_tokens=60
+    )
+
+    # Get the response text from the GPT-3.5 model
+    response_text = response.choices[0].text.strip()
+
+    # Send the response back to the user
+    context.bot.send_message(chat_id=chat_id, text=response_text)
+
+    # Save the response to the database
+    save_message(chat_id, response_text, True)
+
+# Define a function to save a message to the database
+def save_message(chat_id, text, is_bot):
+    now = datetime.datetime.now()
+    timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
+
+    insert_query = f"INSERT INTO messages (chat_id, text, is_bot, timestamp) VALUES ({chat_id}, '{text}', {is_bot}, '{timestamp}')"
+    cursor.execute(insert_query)
     cnx.commit()
 
-# Define function to generate AI response
-def generate_response(input_text):
-    response = openai.Completion.create(
-        engine='text-davinci-002',
-        prompt=input_text,
-        max_tokens=60,
-        n=1,
-        stop=None,
-        temperature=0.5,
-    )
-    return response.choices[0].text.strip()
+# Create a message handler that responds to all text messages
+message_handler = MessageHandler(Filters.text, handle_message)
 
-# Define function to handle incoming messages
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    # Generate AI response
-    response_text = generate_response(message.text)
+# Add the message handler to the dispatcher
+dispatcher.add_handler(message_handler)
 
-    # Send AI response
-    bot.send_message(message.chat.id, response_text)
+# Start the bot
+updater.start_polling()
 
-    # Store chat history
-    store_chat_history(message.chat.id, [message, telebot.types.Message(0, message.chat.id, message.date, True, response_text)])
+# Run the bot until Ctrl-C is pressed or the process receives SIGINT, SIGTERM or SIGABRT
+updater.idle()
 
-# Define function to handle store chat button
-@bot.message_handler(func=lambda message: message.text == 'Store Chat')
-def handle_store_chat(message):
-    # Store chat history
-    chat_history = retrieve_chat_history(message.chat.id)
-    store_chat_history(message.chat.id, [telebot.types.Message(h[2], message.chat.id, h[3], bool(h[4]), h[1]) for h in chat_history])
+# Close the database connection when the bot is stopped
+cursor.close()
+cnx.close()
 
-    # Send confirmation
-    bot.send_message(message.chat.id, 'Chat stored.')
-
-# Define function to handle retrieve chat button
-@bot.message_handler(func=lambda message: message.text == 'Retrieve Chat')
-def handle_retrieve_chat(message):
-    # Retrieve chat history
-    chat_history = retrieve_chat_history(message.chat.id)
-    response_text = '\n'.join([f"{h[3].strftime('%Y-%m-%d %H:%M:%S')}: {'Bot: ' if h[4] else 'You: '}{h[1]}" for h in chat_history])
-
-    # Send chat history
-    bot.send_message(message.chat.id, response_text)
-
-# Start bot
-bot.polling()
 

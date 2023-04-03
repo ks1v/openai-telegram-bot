@@ -13,7 +13,7 @@ with open('keys.json') as f:
 cnx = mysql.connector.connect(
     user=secrets['mariadb']['user'],
     password=secrets['mariadb']['password'],
-    host=secrets['127.0.0.1'],
+    host='127.0.0.1',
     database=['mariadb']['database']
 )
 cursor = cnx.cursor()

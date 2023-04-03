@@ -1,86 +1,89 @@
 import openai
-import telegram
-import pymongo
+import mysql.connector
 import json
+import telebot
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-# Read API secrets from secrets.json file
-with open('keys.json', 'r') as f:
+# Load API keys from secrets.json
+with open('secrets.json') as f:
     secrets = json.load(f)
+    openai.api_key = secrets['openai']['api_key']
+    db_password = secrets['mariadb']['password']
+    bot_token = secrets['telegram']['token']
 
-# Set up OpenAI API credentials
-openai.api_key = secrets['openai']['api_key']
 
-# Set up Telegram bot token
-bot_token = secrets['telegram']['token']
+# Set up MySQL connection
+cnx = mysql.connector.connect(user='ks1v', 
+                              password=db_password,
+                              host='127.0.0.1',
+                              database='openai_tg_bot')
+cursor = cnx.cursor()
 
-# Set up MongoDB database
-mongo_client = pymongo.MongoClient("mongodb://localhost:27017/")
-mongo_db = mongo_client["mydatabase"]
-mongo_collection = mongo_db["chat_sessions"]
+# Set up Telegram bot
+bot = telebot.TeleBot(bot_token)
 
-# Create Telegram bot instance
-bot = telegram.Bot(token=bot_token)
+# Set up keyboard for storing/retrieving chats
+chat_buttons = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+store_chat_button = KeyboardButton(text='Store Chat')
+retrieve_chat_button = KeyboardButton(text='Retrieve Chat')
+chat_buttons.row(store_chat_button, retrieve_chat_button)
 
-# Define function for sending GPT-3.5 responses
-def send_gpt_response(message_text):
-    # Send message to GPT-3.5 API and get response
+# Define function to retrieve chat history
+def retrieve_chat_history(chat_id):
+    cursor.execute('SELECT * FROM chats WHERE chat_id=%s ORDER BY timestamp ASC', (chat_id,))
+    return cursor.fetchall()
+
+# Define function to store chat history
+def store_chat_history(chat_id, messages):
+    for message in messages:
+        cursor.execute('INSERT INTO chats (chat_id, text, is_bot, timestamp) VALUES (%s, %s, %s, %s)',
+                       (chat_id, message.text, int(message.from_bot), message.date.timestamp()))
+    cnx.commit()
+
+# Define function to generate AI response
+def generate_response(input_text):
     response = openai.Completion.create(
-        engine="text-davinci-002",
-        prompt=message_text,
-        max_tokens=1024,
+        engine='text-davinci-002',
+        prompt=input_text,
+        max_tokens=60,
         n=1,
         stop=None,
-        temperature=0.5
+        temperature=0.5,
     )
-    # Extract response from API output
-    response_text = response.choices[0].text.strip()
-    return response_text
+    return response.choices[0].text.strip()
 
-# Define function for handling incoming messages
-def handle_message(update, context):
-    # Extract chat ID and message text
-    chat_id = update.message.chat_id
-    message_text = update.message.text
-    # Check if chat session already exists in database
-    chat_session = mongo_collection.find_one({"chat_id": chat_id})
-    if chat_session:
-        # Append message to existing chat session
-        chat_session["messages"].append(message_text)
-        mongo_collection.update_one({"_id": chat_session["_id"]}, {"$set": {"messages": chat_session["messages"]}})
-    else:
-        # Create new chat session in database
-        chat_session = {"chat_id": chat_id, "messages": [message_text]}
-        mongo_collection.insert_one(chat_session)
-    # Send message to GPT-3.5 API and get response
-    response_text = send_gpt_response("\n".join(chat_session["messages"]))
-    # Send response to Telegram chat
-    bot.send_message(chat_id=chat_id, text=response_text)
+# Define function to handle incoming messages
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    # Generate AI response
+    response_text = generate_response(message.text)
 
-# Define function for handling button presses
-def handle_button(update, context):
-    # Extract chat ID and button data
-    chat_id = update.callback_query.message.chat_id
-    button_data = update.callback_query.data
-    # Get chat session from database
-    chat_session = mongo_collection.find_one({"chat_id": chat_id})
-    if chat_session:
-        # Get message index from button data
-        message_index = int(button_data.split(":")[-1])
-        # Retrieve message text from chat session
-        message_text = chat_session["messages"][message_index]
-        # Send message to GPT-3.5 API and get response
-        response_text = send_gpt_response("\n".join(chat_session["messages"][:-1]) + "\n" + message_text)
-        # Send response to Telegram chat
-        bot.send_message(chat_id=chat_id, text=response_text)
-    else:
-        # If chat session does not exist, send error message
-        bot.send_message(chat_id=chat_id, text="Error: chat session not found")
+    # Send AI response
+    bot.send_message(message.chat.id, response_text)
 
-# Set up handlers for messages and buttons
-updater = telegram.ext.Updater(token=bot_token, use_context=True)
-updater.dispatcher.add_handler(telegram.ext.MessageHandler(telegram.ext.Filters.text, handle_message))
-updater.dispatcher.add_handler(telegram.ext.CallbackQueryHandler(handle_button))
+    # Store chat history
+    store_chat_history(message.chat.id, [message, telebot.types.Message(0, message.chat.id, message.date, True, response_text)])
 
-# Start the bot
-updater.start_polling()
-updater.idle()
+# Define function to handle store chat button
+@bot.message_handler(func=lambda message: message.text == 'Store Chat')
+def handle_store_chat(message):
+    # Store chat history
+    chat_history = retrieve_chat_history(message.chat.id)
+    store_chat_history(message.chat.id, [telebot.types.Message(h[2], message.chat.id, h[3], bool(h[4]), h[1]) for h in chat_history])
+
+    # Send confirmation
+    bot.send_message(message.chat.id, 'Chat stored.')
+
+# Define function to handle retrieve chat button
+@bot.message_handler(func=lambda message: message.text == 'Retrieve Chat')
+def handle_retrieve_chat(message):
+    # Retrieve chat history
+    chat_history = retrieve_chat_history(message.chat.id)
+    response_text = '\n'.join([f"{h[3].strftime('%Y-%m-%d %H:%M:%S')}: {'Bot: ' if h[4] else 'You: '}{h[1]}" for h in chat_history])
+
+    # Send chat history
+    bot.send_message(message.chat.id, response_text)
+
+# Start bot
+bot.polling()
+
